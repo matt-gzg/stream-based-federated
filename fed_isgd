@@ -1,0 +1,188 @@
+import time
+import numpy as np
+import logging
+
+from shared_parameter import *
+from load_cache import (user_id_list, item_id_list, stream_data)
+from logs_paths import output_path
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s | %(levelname)s | %(message)s',
+    handlers=[
+        logging.FileHandler(output_path('federated_grid', 'logs', 'training.log'), mode='a'),
+    ]
+)
+
+logger = logging.getLogger(__name__)
+
+def user_update(user_vector, item_id, v, lr, reg_u, reg_v, iter):
+    gradient = {}
+    p_ui = 1.0
+
+    for _ in range(iter):
+        error = p_ui - np.dot(user_vector, v)
+        user_vector = user_vector - lr * (-2 * error * v + 2 * reg_u * user_vector)
+        gradient[item_id] = lr * (-2 * error * user_vector + 2 * reg_v * v)
+
+    return user_vector, gradient
+
+def aggregate_fedavg(items_matrix_global, items_matrix_local, interact_count, updated_items, item_users_updated, item_users_all, hidden_dim):
+    for item_id in updated_items:
+        total_interacs = 0
+        weighted_sum = np.zeros(hidden_dim)
+
+        for uid in item_users_updated[item_id]:
+            n = interact_count[uid]
+            weighted_sum += (n * items_matrix_local[uid][item_id])
+            total_interacs += n
+
+        if total_interacs > 0:
+            items_matrix_global[item_id] = weighted_sum / total_interacs
+
+            for uid in item_users_all[item_id]:
+                items_matrix_local[uid][item_id] = items_matrix_global[item_id].copy()
+
+    return items_matrix_global, items_matrix_local
+
+def main(train_end, validation_end, hidden_dim, reg_u, reg_v, lr, iter):
+    time_dataset = time.perf_counter()
+
+    users_matrix = 0.1 * np.random.randn(len(user_id_list), hidden_dim)
+    items_matrix_global = 0.1 * np.random.randn(len(item_id_list), hidden_dim)
+    items_matrix_local = {uid: {} for uid in user_id_list}
+    items_matrix_global_T = items_matrix_global.T
+
+    user_id_map = {uid: i for i, uid in enumerate(user_id_list)}
+    seen_items_online = {uid: set() for uid in user_id_list}
+    user_time_list = []
+    updated_items = set()
+    interact_count = {uid: 0 for uid in user_id_list}
+    item_users_updated = {}
+    aggregation_time_list = []
+
+    hits = 0
+    total_predictions = 0
+
+    item_users_all = {}
+
+    last_aggregation_time = time.perf_counter()
+    last_log_time = time.perf_counter()
+
+    for obs_count, (uid, item_id) in enumerate(stream_data[:validation_end], start=1):
+        t = time.perf_counter()
+        
+        phase = "train" if obs_count <= train_end else "validation"
+
+        user_index = user_id_map[uid]
+
+        if phase == 'validation':
+            p = np.dot(users_matrix[user_index], items_matrix_global_T)
+
+            if items_matrix_local[uid]:
+                local_ids = list(items_matrix_local[uid].keys())
+                local_vecs = np.array(list(items_matrix_local[uid].values()))
+                p[local_ids] = users_matrix[user_index] @ local_vecs.T
+
+            seen_items = seen_items_online[uid]
+            if seen_items:
+                p[list(seen_items)] = -np.inf
+
+            top_k = np.argpartition(p, -k)[-k:]
+            if item_id in top_k:
+                hits += 1
+            total_predictions += 1
+
+        if item_id not in items_matrix_local[uid]:
+            items_matrix_local[uid][item_id] = (items_matrix_global[item_id].copy())
+
+        current_item = items_matrix_local[uid][item_id]
+
+        users_matrix[user_index], gradient = user_update(users_matrix[user_index], item_id, current_item, lr, reg_u, reg_v, iter)
+        items_matrix_local[uid][item_id] -= gradient[item_id]
+
+        updated_items.add(item_id)
+        interact_count[uid] += 1
+
+        if item_id not in item_users_updated:
+            item_users_updated[item_id] = set()
+        item_users_updated[item_id].add(uid)
+
+        seen_items_online[uid].add(item_id)
+        user_time_list.append(time.perf_counter() - t)
+
+        if item_id not in item_users_all:
+            item_users_all[item_id] = set()
+        item_users_all[item_id].add(uid)
+
+        if obs_count % 10000 == 0:
+            current_time = time.perf_counter()
+            block_time = current_time - last_log_time
+            logger.info(
+                f'[{phase.upper()}] Processed={obs_count} | '
+                f'AvgUserTime={np.mean(user_time_list[-10000:]):.6f}s | '
+                f'BlockTime={block_time:.6f}s | '
+                f'TotalTime={time.perf_counter() - time_dataset:.6f}s | '
+                f"HR@{k}={'N/A' if phase == 'train' else f'{hits / total_predictions:.4f}'}"
+            )
+            last_log_time = current_time   
+
+        if obs_count % aggregation_int == 0:
+            aggregation_start = time.perf_counter()
+
+            items_matrix_global, items_matrix_local = aggregate_fedavg(items_matrix_global, items_matrix_local, interact_count, updated_items, item_users_updated, item_users_all, hidden_dim)
+            items_matrix_global_T = items_matrix_global.T
+
+            aggregation_elapsed = time.perf_counter() - aggregation_start
+            aggregation_time_list.append(aggregation_elapsed)
+
+            item_users_updated = {}
+            updated_items = set()
+            interact_count = {uid: 0 for uid in user_id_list}
+
+            aggregation_time = time.perf_counter() - last_aggregation_time
+
+            logger.info(
+                f'[Agg {obs_count // aggregation_int}] '
+                f'AggTime={aggregation_elapsed:.6f}s | '
+                f'Time={aggregation_time:.2f}s'
+            )
+            last_aggregation_time = time.perf_counter()
+
+    logger.info(f'HR@{k}: {hits / total_predictions:.4f}')
+    logger.info(f'User Average Time: {np.mean(user_time_list):.6f}')
+    logger.info(f'Total Aggregations: {len(aggregation_time_list)}')
+    logger.info(f'Average Aggregation Time: {np.mean(aggregation_time_list):.6f}s')
+    logger.info(f'Total Time: {time.perf_counter() - time_dataset:.4f} seconds')
+
+    logger.info(
+        f'RESULT | h={h} | reg={ru} | lr={l} | iter={it} | HR20={hits / total_predictions:.6f}'
+    )
+
+if __name__ == '__main__':
+    n = len(stream_data)
+
+    train_end = int(n * train_ratio)
+    validation_end = train_end + int(n * validation_ratio)
+
+    logger.info('-' * 80)
+    logger.info(
+        f'hidden_dim: {hidden_dim} | reg: {reg_u} | lr: {lr} | iter: {iter} \n'
+        f'Dataset size: {n} | '
+        f'Train: {train_end} | '
+        f'Validation: {validation_end - train_end} | '
+        f'Test: {n - validation_end}'
+    )
+
+    for h in hidden_dim:
+        for ru in reg_u:
+                for l in lr:
+                    for it in iter:
+                        logger.info(
+                            f'Running with hidden_dim={h}, '
+                            f'reg_u={ru}, reg_v={ru}, '
+                            f'lr={l}, iter={it}'
+                        )
+                        main(train_end, validation_end, h, ru, ru, l, it)
+
+    main(train_end, validation_end)
