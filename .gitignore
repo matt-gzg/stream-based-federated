@@ -18,3 +18,5 @@ log.txt
 logs/
 datasets/
 logs_paths.py
+
+isgd/

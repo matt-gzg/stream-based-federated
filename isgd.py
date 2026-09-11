@@ -2,7 +2,7 @@ import time
 import numpy as np
 import logging
 from shared_parameter import *
-from load_cache import (user_id_list, item_id_list, train_data, test_data)
+from load_cache import (train_data, test_data)
 from logs_paths import output_path
 
 logging.basicConfig(
@@ -24,27 +24,43 @@ def user_item_update(user_vector, item_vector):
         item_vector = item_vector - lr * grad_item
         return user_vector, item_vector
 
-def process_iter(users_matrix, items_matrix, items_matrix_T, seen_items_online, uid, item_id, evaluate):
+def get_init(matrix, key, scale):
+    if key not in matrix:
+        matrix[key] = scale * np.random.randn(hidden_dim)
+    return matrix[key]
+
+def process_iter(users, items, seen_online, uid, item_id, evaluate, scale):
     hit = None
     hit_rate_time = 0.0
 
+    user_vector = get_init(users, uid, scale)
+    item_vector = get_init(items, item_id, scale)
+
     if evaluate:
         eval = time.perf_counter()
-        p = np.dot(users_matrix[uid], items_matrix_T)
-        seen_items = seen_items_online[uid]
-        if seen_items:
-            p[list(seen_items)] = -np.inf
-        top_k = np.argpartition(-p, k)[:k]
-        hit = item_id in top_k
+
+        item_ids = list(items.keys())
+        items_stack = np.stack([items[iid] for iid in item_ids])
+        p = np.dot(items_stack, user_vector)
+        seen = seen_online.get(uid, set())
+        if seen:
+            seen_pos = [pos for pos, iid in enumerate(item_ids) if iid in seen]
+            p[seen_pos] = -np.inf
+        kk = min(k, len(item_ids))
+        topk_pos = np.argpartition(-p, kk-1)[:kk]
+        topk_items = {item_ids[pos] for pos in topk_pos}
+        hit = item_id in topk_items
         hit_rate_time = time.perf_counter() - eval
 
-    users_matrix[uid], items_matrix[item_id] = user_item_update(users_matrix[uid], items_matrix[item_id])   
-    items_matrix_T[:, item_id] = items_matrix[item_id]
-    seen_items_online[uid].add(item_id)
+    new_user_vector, new_item_vector = user_item_update(user_vector, item_vector)
+    users[uid] = new_user_vector
+    items[item_id] = new_item_vector
+
+    seen_online.setdefault(uid, set()).add(item_id)
 
     return hit, hit_rate_time
 
-def run_phase(data, phase, evaluate, users_matrix, items_matrix, items_matrix_T, seen_items_online, time_dataset):
+def run_phase(data, phase, evaluate, users, items, seen_online, scale, time_dataset):
     logger.info(f'[{phase}] starting | Time={time.perf_counter() - time_dataset:.2f}s')
     hits = 0
     total_predictions = 0
@@ -53,7 +69,7 @@ def run_phase(data, phase, evaluate, users_matrix, items_matrix, items_matrix_T,
     phase_start = time.perf_counter()
 
     for uid, item_id in data:
-        hit, hit_rate_time = process_iter(users_matrix, items_matrix, items_matrix_T, seen_items_online, uid, item_id, evaluate)
+        hit, hit_rate_time = process_iter(users, items, seen_online, uid, item_id, evaluate, scale)
 
         if evaluate:
             if hit:
@@ -75,26 +91,21 @@ def main():
 
     scale = 0.1 / np.sqrt(hidden_dim)
 
-    users_matrix = scale * np.random.randn(len(user_id_list), hidden_dim)
-    items_matrix = scale * np.random.randn(len(item_id_list), hidden_dim)
-    items_matrix_T = items_matrix.T.copy()
+    users = {}
+    items = {}
+    seen_online = {}
 
-    seen_items_online = [set() for _ in user_id_list]
-
-    run_phase(train_data, 'TRAIN', evaluate=False, users_matrix=users_matrix, items_matrix=items_matrix, items_matrix_T=items_matrix_T, seen_items_online=seen_items_online, time_dataset=time_dataset)
-    run_phase(test_data, 'TEST', evaluate=True, users_matrix=users_matrix, items_matrix=items_matrix, items_matrix_T=items_matrix_T, seen_items_online=seen_items_online, time_dataset=time_dataset)
+    run_phase(train_data, 'TRAIN', evaluate=False, users=users, items=items, seen_online=seen_online, scale=scale, time_dataset=time_dataset)
+    run_phase(test_data, 'TEST', evaluate=True, users=users, items=items, seen_online=seen_online, scale=scale, time_dataset=time_dataset)
 
     logger.info(f'Total Time: {time.perf_counter() - time_dataset:.4f} seconds')
+    logger.info(f'Total Users Seen: {len(users)} | Total Items Seen: {len(items)}')
 
 if __name__ == '__main__':
-    train_l = len(train_data)
-    test_l = len(test_data)
-    n = train_l + test_l
-
     logger.info(
         f'\n'
         f'hidden_dim: {hidden_dim} | reg: {reg_u} | lr: {lr} | iter: {iter}\n'
-        f'Dataset size: {n} | Train size: {train_l} | Test size: {test_l}'
+        f'Dataset size: {len(train_data) + len(test_data)} | Train size: {len(train_data)} | Test size: {len(test_data)}'
     )
 
     main()
