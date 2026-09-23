@@ -3,7 +3,7 @@ import pickle
 import pandas as pd
 import time
 
-from shared_parameter import dataset, train_ratio, test_ratio, validation_ratio
+from params import dataset, train_ratio, test_ratio, validation_ratio
 
 start = time.perf_counter()
 
