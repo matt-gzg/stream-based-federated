@@ -1,7 +1,7 @@
 import time
 import numpy as np
 import logging
-from shared_parameter import *
+from params import *
 from load_cache import (train_data, test_data)
 from logs_paths import output_path
 
@@ -22,7 +22,7 @@ def user_item_update(user_vector, item_vector):
         grad_item = -2 * error * user_vector + 2 * reg_v * item_vector
         user_vector = user_vector - lr * grad_user
         item_vector = item_vector - lr * grad_item
-        return user_vector, item_vector
+    return user_vector, item_vector
 
 def get_init(matrix, key, scale):
     if key not in matrix:
