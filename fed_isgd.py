@@ -1,24 +1,3 @@
-"""Federated ISGD with streaming prequential evaluation.
-
-Protocol (same as isgd_ot.py):
-  TRAIN stream update-only, then TEST stream predict-before-update, HR@k.
-  Same seed (42), same init scale/order, same SGD math, same seen-masking.
-
-Federated paradigm:
-  - Each user is a client: user vector + per-item LOCAL copies stay client-side.
-  - Server holds GLOBAL item vectors (+ _ItemCache mirror for fast scoring).
-  - Local SGD update reuses the exact isgd update equations; the item
-    gradient is applied to the client's local copy only.
-  - N_ROUNDS FedAvg rounds run spread evenly over the whole stream
-    (AGG_INTERVAL = total_events // N_ROUNDS events each); each round
-    averages per item over clients that touched it (weight = client's
-    event count since last aggregation), then broadcasts the averaged
-    vector back to the global model and to every local copy holding it.
-  - Item *insertion* (new ids) is still global/immediate so the candidate
-    set and RNG sequence match the centralized run; only *values* diverge
-    after the first aggregation -- by design, federation changes results.
-"""
-
 import time
 import numpy as np
 import logging
@@ -27,17 +6,13 @@ from params import hidden_dim, reg_u, reg_v, lr, n_iter, k
 from load_cache import (train_data, test_data)
 from logs_paths import output_path
 
-# aggregations = TOTAL number of FedAvg rounds over the whole stream
-# (train + test). The rounds spread evenly via fractional boundaries, so
-# exactly N_ROUNDS rounds run even when the division is not exact
-# (e.g. 35 events / 20 rounds -> boundaries, not 35 modulo rounds).
 N_ROUNDS = int(getattr(_sp, 'aggregations', 0) or 0)
 _TOTAL_EVENTS = len(train_data) + len(test_data)
 if N_ROUNDS > 0 and _TOTAL_EVENTS > 0:
-    AGG_INTERVAL = max(1, _TOTAL_EVENTS // N_ROUNDS)  # informational
+    AGG_INTERVAL = max(1, _TOTAL_EVENTS // N_ROUNDS) 
     AGG_BOUNDARIES = {round(_TOTAL_EVENTS * i / N_ROUNDS) for i in range(1, N_ROUNDS + 1)}
 else:
-    AGG_INTERVAL = 0  # 0 = no in-stream aggregation (final flush only)
+    AGG_INTERVAL = 0 
     AGG_BOUNDARIES = set()
 
 logging.basicConfig(
@@ -50,7 +25,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-
 def user_item_update(user_vector, item_vector):
     for _ in range(n_iter):
         error = 1.0 - np.dot(user_vector, item_vector)
@@ -60,16 +34,12 @@ def user_item_update(user_vector, item_vector):
         item_vector = item_vector - lr * grad_item
     return user_vector, item_vector
 
-
 def get_init(matrix, key, scale):
     if key not in matrix:
         matrix[key] = scale * np.random.randn(hidden_dim)
     return matrix[key]
 
-
 class _ItemCache:
-    """Mirrors `items_global` insertion order with a C-contiguous matrix."""
-
     def __init__(self, capacity=4096):
         self.ids = []
         self.pos = {}
@@ -96,9 +66,7 @@ class _ItemCache:
     def write_back(self, item_id, new_vec):
         self.mat[self.pos[item_id]] = new_vec
 
-
 def _aggregate(state):
-    """One FedAvg round over items touched since the last aggregation."""
     if not state['updated_items']:
         return
     t0 = time.perf_counter()
@@ -138,7 +106,6 @@ def _aggregate(state):
     state['agg_time'] += dt
     logger.info(f'[Agg {state["n_aggregations"]}] items={n_aggs} AggTime={dt:.6f}s')
 
-
 def process_iter(state, uid, item_id, evaluate, scale):
     users = state['users']
     items_global = state['items_global']
@@ -148,11 +115,9 @@ def process_iter(state, uid, item_id, evaluate, scale):
     hit = None
     hit_rate_time = 0.0
 
-    # Same RNG order as centralized: user first, then global item.
     user_vector = get_init(users, uid, scale)
     cache.get_init(items_global, item_id, scale)
 
-    # Client's personal copy (plain copy of global, no RNG).
     local = items_local.get(uid)
     if local is None:
         local = {}
@@ -166,7 +131,6 @@ def process_iter(state, uid, item_id, evaluate, scale):
         eval = time.perf_counter()
         n = cache.n
         p = cache.mat[:n] @ user_vector
-        # Personalize: override with local copies where the client has them.
         for iid2, vec in local.items():
             pos = cache.pos.get(iid2)
             if pos is not None:
@@ -256,14 +220,12 @@ def main():
     run_phase(test_data, 'TEST', evaluate=True, state=state,
               scale=scale, time_dataset=time_dataset)
 
-    # Flush leftovers so all updates reach the global model.
     if state['updated_items']:
         _aggregate(state)
 
     logger.info(f'Total Time: {time.perf_counter() - time_dataset:.4f} seconds')
     logger.info(f'Aggregations: {state["n_aggregations"]} | Agg Total Time: {state["agg_time"]:.4f}s')
     logger.info(f'Total Users Seen: {len(state["users"])} | Total Items Seen: {len(state["items_global"])}')
-
 
 if __name__ == '__main__':
     logger.info(
