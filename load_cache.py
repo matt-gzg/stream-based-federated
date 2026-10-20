@@ -2,7 +2,7 @@ import os
 import pickle
 import time
 
-from shared_parameter import dataset, validation_ratio
+from params import dataset, validation_ratio
 
 start = time.perf_counter()
 

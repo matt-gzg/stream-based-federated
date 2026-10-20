@@ -1,7 +1,7 @@
 import time
 import numpy as np
 import logging
-from shared_parameter import *
+from params import *
 from load_cache import (train_data, test_data)
 from logs_paths import output_path
 
